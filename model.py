@@ -24,61 +24,83 @@ class EncoderCNN(nn.Module):
 class DecoderRNN(nn.Module):
     def __init__(self, embed_size, hidden_size, vocab_size, num_layers=1):
         super(DecoderRNN, self).__init__()
-       
+        
+        self.num_layers = num_layers
         self.embed_size = embed_size
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
         
-        # LSTM Cell first => Also try Embedding first, Maybe also Dropout
-        self.lstm = nn.LSTMCell(input_size=embed_size, hidden_size=hidden_size)
+        # First Embed Layer
+        self.embed = nn.Embedding(num_embeddings=self.vocab_size, embedding_dim=self.embed_size)
+        
+        # LSTM Unit
+        self.lstm = nn.LSTM(input_size=embed_size, hidden_size=hidden_size, batch_first=True, dropout=0.5, num_layers=self.num_layers)
         
         # Fully Connected Layer
         self.fc = nn.Linear(in_features=self.hidden_size, out_features=self.vocab_size)
 
-        # Embedding Layer
-        self.embed = nn.Embedding(num_embeddings=self.vocab_size, embedding_dim=self.embed_size)
-        
-        # Activation
-        self.softmax = nn.Softmax(dim=1)
-        
     
     def forward(self, features, captions):
+        captions = captions[:, :-1]
+        
+        # setup the device
+        device = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")
+        
+        # batch size
         batch_size = features.size(0)
         
-        hidden_state = torch.zeros((batch_size, self.hidden_size)).cuda()
-        cell_state = torch.zeros((batch_size, self.hidden_size)).cuda()
-        
-        outputs = torch.empty((batch_size, captions.size(1), self.vocab_size)).cuda()
-        
+        # init the hidden and cell states to zeros
+        self.hidden_state = torch.zeros((1, batch_size, self.hidden_size)).to(device)
+        self.cell_state = torch.zeros((1, batch_size, self.hidden_size)).to(device)
+
+        # embed the captions
         captions_embed = self.embed(captions)
         
-        for t in range(captions.size(1)):
-            if t == 0:
-                hidden_state, cell_state = self.lstm(features, (hidden_state, cell_state))
-            else:
-                hidden_state, cell_state = self.lstm(captions_embed[:, t, :], (hidden_state, cell_state))
-               
-            out = self.fc(hidden_state)
-            
-            outputs[:, t, :] = out
+        # pass through lstm unit(s)
+        vals = torch.cat((features.unsqueeze(1), captions_embed), dim=1)
+        outputs, (self.hidden_state, self.cell_state) = self.lstm(vals, (self.hidden_state, self.cell_state))
+        
+        # pass through the linear unit
+        outputs = self.fc(outputs)
             
         return outputs
+
     
     
     def sample(self, inputs, states=None, max_len=20):
         " accepts pre-processed image tensor (inputs) and returns predicted sentence (list of tensor ids of length max_len) "
-        predictions = []
-        for i in range(max_len):
-            lstm_out, states = self.lstm(inputs, states)
-            out = lstm_out.squeeze(1)
-            out = self.fc(out)
-            _, prediction = out.max(1)
-            outputs.append(prediction.item())
+        device = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")
+        
+        # initialize the output
+        output = []
+        # batch_size
+        batch_size = inputs.shape[0]
+        
+        # initialize hidden state
+        self.hidden_state = torch.zeros((1, batch_size, self.hidden_size)).to(device)
+        self.cell_state = torch.zeros((1, batch_size, self.hidden_size)).to(device)
+    
+        while True: 
+            # pass through lstm unit(s)
+            lstm_out, (self.hidden_state, self.cell_state) = self.lstm(inputs, (self.hidden_state, self.cell_state))
             
-            if prediction == 1:
+            # pass through linear unit
+            outputs = self.fc(lstm_out)
+            
+            # predict the most likely next word
+            outputs = outputs.squeeze(1)
+            _, max_indice = torch.max(outputs, dim=1) 
+            
+            # storing the word predicted
+            output.append(max_indice.cpu().numpy()[0].item()) 
+            
+            if (max_indice == 1 or len(output) >= max_len):
+                # if reached the max length or predicted the end token
                 break
             
-            embeddings = self.embed(prediction).unsqueeze(1)
-      
-        return outputs
+            ## embed the last predicted word to be the new input of the lstm
+            inputs = self.embed(max_indice) 
+            inputs = inputs.unsqueeze(1)
+            
+        return output
         # pass
